@@ -23,7 +23,16 @@ class Handler
 {
     protected $transactionId;
 
+    /**
+     * MySQL/MariaDB errors after which InnoDB has already rolled back the entire transaction:
+     * 1213 = deadlock, 1020 = record changed since last read (innodb_snapshot_isolation=ON,
+     * the default since MariaDB 11.6.2). After these the connection is back in autocommit mode,
+     * so any further statement would be committed immediately and could not be rolled back.
+     */
+    private const TRANSACTION_ABORTING_ERRORS = [1213, 1020];
+
     private $hasError = false;
+    private $transactionAborted = false;
     private $requestSetsToRetry = array();
     private $count = 0;
     private $numTrackedRequestsBeginning = 0;
@@ -32,6 +41,7 @@ class Handler
     {
         $this->requestSetsToRetry = array();
         $this->hasError = false;
+        $this->transactionAborted = false;
         $this->numTrackedRequestsBeginning = $tracker->getCountOfLoggedRequests();
         $this->transactionId = $this->getDb()->beginTransaction();
     }
@@ -83,10 +93,17 @@ class Handler
 
         Common::printDebug('Got exception: ' . $e->getMessage());
 
-        // retry if a deadlock or a lock wait timeout happened
-        if (Db::get()->isErrNo($e, 1213) || Db::get()->isErrNo($e, 1205)) {
+        if ($this->isTransactionAbortingError($e)) {
+            // the whole batch was rolled back by the database, the processor has to stop and retry all of it
+            $this->transactionAborted = true;
+            Common::printDebug('Database rolled back the transaction, the whole batch needs to be retried');
+            return;
+        }
+
+        // retry if a lock wait timeout happened (only the statement was rolled back, the transaction is still active)
+        if (Db::get()->isErrNo($e, 1205)) {
             $this->requestSetsToRetry[] = $requestSet;
-            Common::printDebug('Added deadlocked requestSet to requestSetsToRetry');
+            Common::printDebug('Added requestSet with lock wait timeout to requestSetsToRetry');
             return;
         }
 
@@ -103,10 +120,39 @@ class Handler
         return $this->hasError;
     }
 
+    /**
+     * Whether the database already rolled back the current transaction because of a deadlock or
+     * snapshot isolation conflict. No further request sets may be processed in this batch.
+     */
+    public function isTransactionAborted(): bool
+    {
+        return $this->transactionAborted;
+    }
+
     public function rollBack(Tracker $tracker)
     {
         $tracker->setCountOfLoggedRequests($this->numTrackedRequestsBeginning);
-        $this->getDb()->rollBack($this->transactionId);
+
+        try {
+            $this->getDb()->rollBack($this->transactionId);
+        } catch (Exception $e) {
+            // the database may have rolled back the transaction already (eg deadlock), nothing left to roll back
+            if (stripos($e->getMessage(), 'no active transaction') === false) {
+                throw $e;
+            }
+            Common::printDebug('Ignoring rollback error as transaction is no longer active: ' . $e->getMessage());
+        }
+    }
+
+    private function isTransactionAbortingError(Exception $e): bool
+    {
+        foreach (self::TRANSACTION_ABORTING_ERRORS as $errNo) {
+            if (Db::get()->isErrNo($e, $errNo)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

@@ -83,6 +83,32 @@ class IntegrationTestCase extends \Piwik\Tests\Framework\TestCase\IntegrationTes
         return $set;
     }
 
+    /**
+     * Builds a request set whose requests carry the param marker = $marker, optionally failing at one index with a
+     * database error message, eg 'SQLSTATE[40001]: Serialization failure: 1213 Deadlock found ...'.
+     */
+    protected function buildRequestSetWithMarker($marker, $numberOfRequests, $indexThatShouldFail = null, $errorMessage = null, $failOnlyOnce = false)
+    {
+        $requests = array();
+
+        for ($i = 0; $i < $numberOfRequests; $i++) {
+            $params = array('idsite' => '1', 'index' => $i, 'marker' => $marker);
+            if ($i === $indexThatShouldFail) {
+                $params['forceThrow'] = 1;
+                $params['forceThrowMessage'] = $errorMessage;
+                if ($failOnlyOnce) {
+                    $params['forceThrowOnce'] = $marker . '-' . $i;
+                }
+            }
+            $requests[] = new Request($params);
+        }
+
+        $set = new RequestSet();
+        $set->setRequests($requests);
+
+        return $set;
+    }
+
     protected function assertRequestsAreEqual(PiwikRequestSet $expected, PiwikRequestSet $actual)
     {
         $eState = $expected->getState();

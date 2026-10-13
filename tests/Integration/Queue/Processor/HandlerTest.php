@@ -97,6 +97,48 @@ class HandlerTest extends IntegrationTestCase
         $this->assertTrue($this->handler->hasErrors());
     }
 
+    public function test_onException_shouldMarkTheTransactionAsAborted_OnDeadlock()
+    {
+        $this->handler->onException(new RequestSet(), new \Exception('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock'));
+
+        $this->assertTrue($this->handler->hasErrors());
+        $this->assertTrue($this->handler->isTransactionAborted());
+    }
+
+    public function test_onException_shouldMarkTheTransactionAsAborted_OnSnapshotIsolationConflict()
+    {
+        $this->handler->onException(new RequestSet(), new \Exception("SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table 'log_visit'"));
+
+        $this->assertTrue($this->handler->hasErrors());
+        $this->assertTrue($this->handler->isTransactionAborted());
+    }
+
+    public function test_onException_shouldNotMarkTheTransactionAsAborted_OnLockWaitTimeout()
+    {
+        $requestSet = new RequestSet();
+        $this->handler->onException($requestSet, new \Exception('SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded'));
+
+        $this->assertTrue($this->handler->hasErrors());
+        $this->assertFalse($this->handler->isTransactionAborted());
+        $this->assertSame(array($requestSet), $this->handler->getRequestSetsToRetry());
+    }
+
+    public function test_onException_shouldNotMarkTheTransactionAsAborted_OnOtherErrors()
+    {
+        $this->handler->onException(new RequestSet(), new \Exception());
+
+        $this->assertFalse($this->handler->isTransactionAborted());
+    }
+
+    public function test_init_shouldResetAnAbortedTransaction()
+    {
+        $this->handler->onException(new RequestSet(), new \Exception('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found'));
+        $this->assertTrue($this->handler->isTransactionAborted());
+
+        $this->handler->init($this->tracker);
+        $this->assertFalse($this->handler->isTransactionAborted());
+    }
+
     public function test_init_shouldResetAFaultyHandler()
     {
         $this->handler->onException(new RequestSet(), new \Exception());

@@ -194,6 +194,13 @@ class Processor
             } catch (\Exception $e) {
                 Common::printDebug('Failed to process a queued request set' . $e->getMessage());
                 $this->handler->onException($requestSet, $e);
+
+                if ($this->handler->isTransactionAborted()) {
+                    // The database already rolled back everything tracked so far in this batch and the connection
+                    // is now in autocommit mode. Processing further request sets would commit them outside of the
+                    // transaction, and they would be tracked twice when the batch is retried.
+                    break;
+                }
             }
         }
 
@@ -205,6 +212,11 @@ class Processor
             $this->handler->rollBack($tracker);
         } else {
             $this->handler->commit();
+        }
+
+        if ($this->handler->isTransactionAborted()) {
+            // nothing of this batch was persisted, retry all request sets including the ones not processed yet
+            return array_values($queuedRequestSets);
         }
 
         return $this->handler->getRequestSetsToRetry();

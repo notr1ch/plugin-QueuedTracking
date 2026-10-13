@@ -95,4 +95,42 @@ class HandlerTest extends UnitTestCase
         $this->assertEquals($this->transactionId, $this->db->rollbackTransactionId);
         $this->assertFalse($this->db->commitTransactionId);
     }
+
+    public function test_rollback_ShouldIgnoreError_IfTheDatabaseHasNoActiveTransactionAnymore()
+    {
+        $this->handler->setDb(new RollbackFailingDb(new \PDOException('There is no active transaction')));
+        $this->tracker->setCountOfLoggedRequests(5);
+        $this->handler->init($this->tracker);
+        $this->tracker->setCountOfLoggedRequests(9);
+
+        $this->handler->rollBack($this->tracker);
+
+        $this->assertSame(5, $this->tracker->getCountOfLoggedRequests());
+    }
+
+    public function test_rollback_ShouldRethrowOtherErrors()
+    {
+        $this->expectException(\PDOException::class);
+        $this->expectExceptionMessage('MySQL server has gone away');
+
+        $this->handler->setDb(new RollbackFailingDb(new \PDOException('MySQL server has gone away')));
+        $this->handler->init($this->tracker);
+        $this->handler->rollBack($this->tracker);
+    }
+}
+
+class RollbackFailingDb extends Db
+{
+    private $exception;
+
+    public function __construct(\Exception $exception)
+    {
+        parent::__construct(array());
+        $this->exception = $exception;
+    }
+
+    public function rollBack($xid)
+    {
+        throw $this->exception;
+    }
 }

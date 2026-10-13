@@ -229,6 +229,70 @@ class ProcessorTest extends IntegrationTestCase
         $this->assertCount(2, $requestSet2->getRequests());
     }
 
+    public static function getTransactionAbortingErrors()
+    {
+        return array(
+            'deadlock' => array('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'),
+            'snapshot isolation' => array("SQLSTATE[HY000]: General error: 1020 Record has changed since last read in table 'log_visit'"),
+        );
+    }
+
+    /**
+     * @dataProvider getTransactionAbortingErrors
+     */
+    public function test_processRequestSets_ShouldStopAndRetryTheWholeBatch_IfTheDatabaseAbortedTheTransaction($errorMessage)
+    {
+        $tracker = $this->createTracker();
+        $tracker->setCountOfLoggedRequests(17);
+        $queuedRequestSets = array(
+            $requestSet1 = $this->buildRequestSetWithMarker('set1', 2),
+            $requestSet2 = $this->buildRequestSetWithMarker('set2', 3, 1, $errorMessage),
+            $requestSet3 = $this->buildRequestSetWithMarker('set3', 3),
+            $requestSet4 = $this->buildRequestSetWithMarker('set4', 1),
+        );
+
+        $this->acquireAllQueueLocks();
+        $requestSetsToRetry = $this->processor->processRequestSets($tracker, $queuedRequestSets);
+
+        // the database rolled back everything, so nothing may be tracked after the failure (it would be auto-committed)
+        $this->assertSame(array('set1', 'set1', 'set2'), $tracker->trackedMarkers);
+        // and every request set of the batch has to be retried, unmodified
+        $this->assertEquals(array($requestSet1, $requestSet2, $requestSet3, $requestSet4), $requestSetsToRetry);
+        $this->assertCount(3, $requestSet2->getRequests());
+        $this->assertSame(17, $tracker->getCountOfLoggedRequests());
+    }
+
+    public function test_processRequestSets_ShouldContinueTheBatch_IfOnlyTheStatementWasRolledBack()
+    {
+        $tracker = $this->createTracker();
+        $queuedRequestSets = array(
+            $requestSet1 = $this->buildRequestSetWithMarker('set1', 2),
+            $requestSet2 = $this->buildRequestSetWithMarker('set2', 3, 1, 'SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction'),
+            $requestSet3 = $this->buildRequestSetWithMarker('set3', 1),
+        );
+
+        $this->acquireAllQueueLocks();
+        $requestSetsToRetry = $this->processor->processRequestSets($tracker, $queuedRequestSets);
+
+        $this->assertSame(array('set1', 'set1', 'set2', 'set3'), $tracker->trackedMarkers);
+        $this->assertEquals(array($requestSet1, $requestSet2, $requestSet3), $requestSetsToRetry);
+    }
+
+    /**
+     * @dataProvider getTransactionAbortingErrors
+     */
+    public function test_process_ShouldTrackEveryRequestExactlyOnce_IfTheDatabaseAbortedTheTransaction($errorMessage)
+    {
+        $this->queue->addRequestSetToQueues($this->buildRequestSetWithMarker('set1', 2));
+        $this->queue->addRequestSetToQueues($this->buildRequestSetWithMarker('set2', 3, 1, $errorMessage, $failOnlyOnce = true));
+        $this->queue->addRequestSetToQueues($this->buildRequestSetWithMarker('set3', 3));
+
+        $tracker = $this->processor->process($this->createTracker());
+
+        $this->assertSame(2 + 3 + 3, $tracker->getCountOfLoggedRequests());
+        $this->assertNumberOfRequestSetsLeftInQueue(0);
+    }
+
     public function test_processRequestSets_ShouldReturnAnEmptyArray_IfNoRequestSetsAreGiven()
     {
         $requestSetsToRetry = $this->processor->processRequestSets($this->createTracker(), array());
